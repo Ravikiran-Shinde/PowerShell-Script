@@ -1,78 +1,71 @@
-# Set Variables for SQL Server Instance and Replication Details
-$Publisher = "PublisherServer"
-$Distributor = "DistributorServer"
-$Subscriber = "SubscriberServer"
+# Set Variables
+$Publisher = "PublisherServer\SQLInstance"
+$Distributor = "DistributorServer\SQLInstance"
+$Subscriber = "SubscriberServer\SQLInstance"
+$ReplicationDB = "YourReplicationDB"
 $Publication = "YourPublication"
-$Subscription = "YourSubscription"
-$ReplicationDatabase = "YourReplicationDatabase"
+$SubscriberDB = "YourSubscriberDB"
+$DistributorAdminPassword = "StrongPassword123"  # use secret vault in production
 
-# Define SQL Server Replication Command
-$ReplicationCommand = @"
-    -- Ensure distributor is configured
-    EXEC sp_adddistributor @distributor = N'$Distributor', @password = N'password';
-    
-    -- Configure the distributor for your publisher
-    EXEC sp_adddistributiondb @database = N'distribution';
-    EXEC sp_addpublication @publication = N'$Publication', @publisher = N'$Publisher', 
-                           @publication_type = 2, @replication_mode = 1;
+# Load dbatools module
+Import-Module dbatools
 
-    -- Add Subscription for Merge Replication
-    EXEC sp_addsubscription @publication = N'$Publication', @subscriber = N'$Subscriber', 
-                            @subscription_type = N'pull', @subscriber_db = N'$ReplicationDatabase';
-"@
-
-# Define SQL Server Connection
-$SQLConnection = New-Object System.Data.SqlClient.SqlConnection
-$SQLConnection.ConnectionString = "Server=$Publisher;Integrated Security=True;"
-
-# Function to Execute SQL Command with Try/Catch
-function Execute-SQLCommand {
-    param (
-        [string]$command
-    )
-
-    try {
-        # Open SQL connection
-        $SQLConnection.Open()
-        Write-Host "Executing command..."
-        $SQLCmd = $SQLConnection.CreateCommand()
-        $SQLCmd.CommandText = $command
-        $SQLCmd.ExecuteNonQuery()
-        Write-Host "Replication configuration completed successfully."
-    }
-    catch {
-        Write-Host "An error occurred: $_"
-    }
-    finally {
-        $SQLConnection.Close()
-        Write-Host "Connection closed."
-    }
+# Step 1: Configure Distributor
+try {
+    Write-Host "Configuring Distributor..." -ForegroundColor Cyan
+    Set-DbaDbDistributor -SqlInstance $Distributor -AdminLinkPassword $DistributorAdminPassword -Force
+    Write-Host "Distributor configured successfully." -ForegroundColor Green
+}
+catch {
+    Write-Host "Error configuring distributor: $_" -ForegroundColor Red
 }
 
-# Run Replication Configuration Command
-Execute-SQLCommand -command $ReplicationCommand
-
-# Monitor the replication status
+# Step 2: Add Publisher to Distributor
 try {
-    # Connect to Distributor
-    $SQLConnection.ConnectionString = "Server=$Distributor;Integrated Security=True;"
-    $SQLConnection.Open()
-    $CheckReplicationStatus = "SELECT * FROM distribution.dbo.MSmerge_agents"
-    $SQLCmd = $SQLConnection.CreateCommand()
-    $SQLCmd.CommandText = $CheckReplicationStatus
-    $Reader = $SQLCmd.ExecuteReader()
+    Write-Host "Adding Publisher to Distributor..." -ForegroundColor Cyan
+    Add-DbaReplicationPublisher -SqlInstance $Publisher -Distributor $Distributor -DistributorAdminPassword $DistributorAdminPassword
+    Write-Host "Publisher registered with Distributor." -ForegroundColor Green
+}
+catch {
+    Write-Host "Error adding Publisher: $_" -ForegroundColor Red
+}
 
-    if ($Reader.HasRows) {
-        Write-Host "Replication Agents are running."
+# Step 3: Create Merge Publication
+try {
+    Write-Host "Creating Merge Publication..." -ForegroundColor Cyan
+    New-DbaReplicationPublication -SqlInstance $Publisher -Database $ReplicationDB `
+        -Publication $Publication -PublicationType Merge
+    Write-Host "Merge publication created." -ForegroundColor Green
+}
+catch {
+    Write-Host "Error creating publication: $_" -ForegroundColor Red
+}
+
+# Step 4: Add Subscriber
+try {
+    Write-Host "Adding Subscriber..." -ForegroundColor Cyan
+    Add-DbaReplicationSubscriber -SqlInstance $Publisher -Subscriber $Subscriber `
+        -SubscriberDatabase $SubscriberDB -Publication $Publication `
+        -SubscriptionType Pull -SubscriptionDB $SubscriberDB
+    Write-Host "Subscriber added successfully." -ForegroundColor Green
+}
+catch {
+    Write-Host "Error adding subscriber: $_" -ForegroundColor Red
+}
+
+# Step 5: Monitor Merge Agents
+try {
+    Write-Host "Checking Merge Agents on Distributor..." -ForegroundColor Cyan
+    $agents = Get-DbaReplicationMergeAgent -SqlInstance $Distributor
+
+    if ($agents.Count -gt 0) {
+        $agents | Select Name, LastActionMessage, LastRunStatus, StartTime | Format-Table -AutoSize
+        Write-Host "Merge agents retrieved successfully." -ForegroundColor Green
     }
     else {
-        Write-Host "No replication agents found. Check configuration."
+        Write-Host "No merge replication agents found." -ForegroundColor Yellow
     }
 }
 catch {
-    Write-Host "An error occurred during replication monitoring: $_"
-}
-finally {
-    $SQLConnection.Close()
-    Write-Host "Connection closed."
+    Write-Host "Error retrieving merge agents: $_" -ForegroundColor Red
 }
